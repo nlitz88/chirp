@@ -6,10 +6,10 @@ import argparse
 from pathlib import Path
 import argparse
 from pathlib import Path
+from datetime import datetime
 
 import numpy as np
 import cv2 as cv
-
 from ultralytics import YOLO
 import supervision as sv
 
@@ -28,6 +28,11 @@ def main():
                         "--yolo-weights",
                         help="Filepath of the YOLOv8 detection model weights being used",
                         type=str)
+    parser.add_argument("-o",
+                        "--output-directory",
+                        default=None,
+                        help="Directory where the resulting video file will be created (only if specified--does not create an output video file by default).",
+                        type=str)
     # Parse received arguments.
     args = parser.parse_args()
     video_source_path = Path(args.video_source)
@@ -36,7 +41,11 @@ def main():
     model_weights_path = Path(args.yolo_weights)
     if not model_weights_path.exists():
         raise FileNotFoundError(f"YOLOv8 model weights not found at provided path: {model_weights_path}")
-
+    output_directory_path = Path(args.output_directory)
+    if not output_directory_path.exists():
+        raise FileNotFoundError(f"Provided directory {output_directory_path} does not exist or cannot be accessed.")
+    else:
+        video_output_path = output_directory_path/f"chirp_{str(datetime.now())}.mp4"
     # TODO: Create a "BirdCounter" class of some sort where, given the parsed
     # arguments from whatever interface you're using above (like a CLI), you
     # instantiate a new BirdCounter instance and then run the stream as a method
@@ -49,6 +58,9 @@ def main():
     else:
         video_framerate = feeder_camera.get(cv.CAP_PROP_FPS)
         print(f"Feeder camera framerate: {video_framerate}")
+
+    # TODO: Remove video sink, this is just for debugging.
+    video_info = sv.VideoInfo.from_video_path(str(video_source_path))
 
     # Define counting zone polygons.
     # Define zone that covers the entire camera frame. Handles counting all
@@ -118,162 +130,165 @@ def main():
     full_zone_annotator = sv.PolygonZoneAnnotator(zone=full_zone,
                                                   color=sv.Color.green())
 
-    while True:
-        status, frame = feeder_camera.read()
+    with sv.VideoSink(target_path=str(video_output_path), video_info=video_info) as video_sink:
+        while True:
+            status, frame = feeder_camera.read()
 
-        # If the frame could not be grabbed successfully, bail out.
-        if not status:
-            print(f"Failed to retrieve frame from video {video_source_path}.")
-            break
+            # If the frame could not be grabbed successfully, bail out.
+            if not status:
+                print(f"Failed to retrieve frame from video {video_source_path}.")
+                break
 
-        # Grab frame attributes.
-        frame_height, frame_width, _ = frame.shape
-        preview_height = frame_height // 2
-        preview_width = frame_width // 2
+            # Grab frame attributes.
+            frame_height, frame_width, _ = frame.shape
+            preview_height = frame_height // 2
+            preview_width = frame_width // 2
 
-        # Run inference on the captured frame.
-        result = model(frame, verbose=False)[0] # Only want the results for the single frame passed in.
-        # Convert the results from ultralytics format to supervision's format.
-        detections = sv.Detections.from_ultralytics(ultralytics_results=result)
-        # Pass detections to tracker. The tracker will update the
-        # "tracker_id"field for each detected instance.
-        # TODO: Figure out if this should be done BEFORE or AFTER we filter out
-        # detections from the detector. Something tells me ByteTrack does better
-        # by using any low confidence detections. But before NMS as well?
-        detections = tracker.update_with_detections(detections=detections)
-        
-        # Pass the tracked detections to any zones. The Zone objects will take
-        # those tracked detections and determine the number of instances
-        # currently in that zone.
-        # TODO: Have to use the boolean (mask) list returned by this function to
-        # determine which detections are in the zone and which are not.
-        zone_detections_mask = full_zone.trigger(detections=detections)
-        detections_in_zone = detections[zone_detections_mask]
-        entered_detections, exited_detections = full_zone_monitor.update(detections_in_zone=detections_in_zone)
-        total_bird_count += len(entered_detections)
+            # Run inference on the captured frame.
+            result = model(frame, verbose=False)[0] # Only want the results for the single frame passed in.
+            # Convert the results from ultralytics format to supervision's format.
+            detections = sv.Detections.from_ultralytics(ultralytics_results=result)
+            # Pass detections to tracker. The tracker will update the
+            # "tracker_id"field for each detected instance.
+            # TODO: Figure out if this should be done BEFORE or AFTER we filter out
+            # detections from the detector. Something tells me ByteTrack does better
+            # by using any low confidence detections. But before NMS as well?
+            detections = tracker.update_with_detections(detections=detections)
+            
+            # Pass the tracked detections to any zones. The Zone objects will take
+            # those tracked detections and determine the number of instances
+            # currently in that zone.
+            # TODO: Have to use the boolean (mask) list returned by this function to
+            # determine which detections are in the zone and which are not.
+            zone_detections_mask = full_zone.trigger(detections=detections)
+            detections_in_zone = detections[zone_detections_mask]
+            entered_detections, exited_detections = full_zone_monitor.update(detections_in_zone=detections_in_zone)
+            total_bird_count += len(entered_detections)
 
-        # Temporary code here to print out which birds (and what type entered
-        # and exited in a given frame. This is just for debugging/human
-        # readability.
-        for detection in entered_detections:
-            print(f"A {model.names[detection[3]]} (Tracker ID {detection[4]}) arrived.")
-        for detection in exited_detections:
-            print(f"{model.names[detection[3]]} (Tracker ID {detection[4]}) headed out.")
-            # It would also be cool to print out the elapsed time, how long it
-            # stayed. Can add this if I have the timestamp in the returned
-            # detections as well. Not yet, but maybe a future feature. That's
-            # simple enough to compute externally in a spreadsheet, too.
+            # Temporary code here to print out which birds (and what type entered
+            # and exited in a given frame. This is just for debugging/human
+            # readability.
+            for detection in entered_detections:
+                print(f"A {model.names[detection[3]]} (Tracker ID {detection[4]}) arrived.")
+            for detection in exited_detections:
+                print(f"{model.names[detection[3]]} (Tracker ID {detection[4]}) headed out.")
+                # It would also be cool to print out the elapsed time, how long it
+                # stayed. Can add this if I have the timestamp in the returned
+                # detections as well. Not yet, but maybe a future feature. That's
+                # simple enough to compute externally in a spreadsheet, too.
 
-        # TODO: Add some temporary dictionary to track the number of each
-        # species and use that (again, temporarily) to annotate the stream with.
+            # TODO: Add some temporary dictionary to track the number of each
+            # species and use that (again, temporarily) to annotate the stream with.
 
-        # TODO Set up a logger and log these human readable outputs to a
-        # file--or just use a simple file for now.
-        # TODO Set up logging the entered and exited detections to a CSV or
-        # excel workbook. OR going directly to google sheets.
-        # TODO: Could even take stats/metrics (as soon as they're computed
-        # externally) and report them with a YouTube chat bot. I.e., a bird
-        # shows up and then leaves. Leaving could trigger an event for the bot
-        # to report "Black capped chickadee (ID 3021) just headed out :wave".
-        # TODO: Reply to supervision thread to see if this is something that
-        # they'd want to add to the PolygonZone class.
+            # TODO Set up a logger and log these human readable outputs to a
+            # file--or just use a simple file for now.
+            # TODO Set up logging the entered and exited detections to a CSV or
+            # excel workbook. OR going directly to google sheets.
+            # TODO: Could even take stats/metrics (as soon as they're computed
+            # externally) and report them with a YouTube chat bot. I.e., a bird
+            # shows up and then leaves. Leaving could trigger an event for the bot
+            # to report "Black capped chickadee (ID 3021) just headed out :wave".
+            # TODO: Reply to supervision thread to see if this is something that
+            # they'd want to add to the PolygonZone class.
 
 
-        # TODO: Rough idea:
-        # For the detections that are within the zone: maintain a dictionary of
-        # detections within the zone and their tracker_id. Maybe use a counter.
-        # Basically, increment a count for each element for each frame that they
-        # are present.
-        # OR, set a timeout number of frames for each tracker_id. Each frame
-        # that a tracker_id is present, just set the number to whatever the
-        # timeout is. If a tracker_id is in the dictionary and is not present in
-        # the current frame, then decrement its timeout counter by one. If the
-        # timeout counter goes to zero, then remove that tracked instance from
-        # the dictionary. Make sure that timeout matches the tracker's timeout
-        # if you to avoid some duplicate counting. Ideally, the tracker doesn't
-        # lose the object and maintains a track on it--but I think that's also a
-        # function of the detection model being used. Need to look into the
-        # tracker's parameters.
+            # TODO: Rough idea:
+            # For the detections that are within the zone: maintain a dictionary of
+            # detections within the zone and their tracker_id. Maybe use a counter.
+            # Basically, increment a count for each element for each frame that they
+            # are present.
+            # OR, set a timeout number of frames for each tracker_id. Each frame
+            # that a tracker_id is present, just set the number to whatever the
+            # timeout is. If a tracker_id is in the dictionary and is not present in
+            # the current frame, then decrement its timeout counter by one. If the
+            # timeout counter goes to zero, then remove that tracked instance from
+            # the dictionary. Make sure that timeout matches the tracker's timeout
+            # if you to avoid some duplicate counting. Ideally, the tracker doesn't
+            # lose the object and maintains a track on it--but I think that's also a
+            # function of the detection model being used. Need to look into the
+            # tracker's parameters.
 
-        # NOTE: Does a separate "in-count" and "out-count" make sense for the
-        # zone? I.e., I feel like I only care about "how many objects were in
-        # this zone cumulatively?" Maybe that's the same thing as saying "How
-        # many objects entered this zone," where enter could mean "appeared" or
-        # came in from outside of the zone. In theory, though, the number of
-        # instances that enter a zone should also exit a zone (whether exit
-        # means "disappear suddenly" or move from the zone to a region still in
-        # view but no longer in the zone). I feel like those would always be the
-        # same?
-        
-        # UNLESS you are in fact interested in knowing how many objects entered
-        # a zone in a certain time range. Granted, you should just be able to
-        # determine this from the change in count.
-        # BUT, what if you want to know how many instances LEFT/exited a
-        # particular zone during a certain time range. Well, in that case,
-        # yes--you could increment a "out-count" that rises as elements leave.
-        
-        # BUT if you're really interested in that, you could also just
-        # plot/store the number of instances in the zone at each unit time, and
-        # then figure out how many left in that time range later. I suppose you
-        # could say the same about how many were in the zone in total /
-        # cumulatively--I.e., it's something that you could extract from
-        # recorded data later on / after the fact.
+            # NOTE: Does a separate "in-count" and "out-count" make sense for the
+            # zone? I.e., I feel like I only care about "how many objects were in
+            # this zone cumulatively?" Maybe that's the same thing as saying "How
+            # many objects entered this zone," where enter could mean "appeared" or
+            # came in from outside of the zone. In theory, though, the number of
+            # instances that enter a zone should also exit a zone (whether exit
+            # means "disappear suddenly" or move from the zone to a region still in
+            # view but no longer in the zone). I feel like those would always be the
+            # same?
+            
+            # UNLESS you are in fact interested in knowing how many objects entered
+            # a zone in a certain time range. Granted, you should just be able to
+            # determine this from the change in count.
+            # BUT, what if you want to know how many instances LEFT/exited a
+            # particular zone during a certain time range. Well, in that case,
+            # yes--you could increment a "out-count" that rises as elements leave.
+            
+            # BUT if you're really interested in that, you could also just
+            # plot/store the number of instances in the zone at each unit time, and
+            # then figure out how many left in that time range later. I suppose you
+            # could say the same about how many were in the zone in total /
+            # cumulatively--I.e., it's something that you could extract from
+            # recorded data later on / after the fact.
 
-        # ALSO: On a slightly different note--I think there also needs to be
-        # some kind of threshold number of frames that a tracker_id must be
-        # present for before we can count it as a present object. I.e., if a
-        # cardinal shows up, but is mistakenly classified as a male housefinch
-        # for two frames, I don't want that housefinch getting counted--as its
-        # not really there, and was only detected as that for two frames.
-        # Rather, I only want to count an instance of a class if it has been
-        # tracked for >= some number of frames.
+            # ALSO: On a slightly different note--I think there also needs to be
+            # some kind of threshold number of frames that a tracker_id must be
+            # present for before we can count it as a present object. I.e., if a
+            # cardinal shows up, but is mistakenly classified as a male housefinch
+            # for two frames, I don't want that housefinch getting counted--as its
+            # not really there, and was only detected as that for two frames.
+            # Rather, I only want to count an instance of a class if it has been
+            # tracked for >= some number of frames.
 
-        # So maybe, when a new tracker_id is added to the dict, we have a couple
-        # of data points/counters associated with it:
-        # 1. Timestamp / time arrived?
-        # 2. Number of frames appeared in (that tracker_id is present in)
-        # 3. Timeout frames == refreshed/set to TIMEOUT each time the tracker_id
-        #    is present.
-        # 
+            # So maybe, when a new tracker_id is added to the dict, we have a couple
+            # of data points/counters associated with it:
+            # 1. Timestamp / time arrived?
+            # 2. Number of frames appeared in (that tracker_id is present in)
+            # 3. Timeout frames == refreshed/set to TIMEOUT each time the tracker_id
+            #    is present.
+            # 
 
-        # NMS_IOU_THRESHOLD = 0.5
-        # filtered_detections = detections.with_nms(threshold=NMS_IOU_THRESHOLD)
-        # # Filter out any remaining detections with confidence less than a
-        # # specified threshold.
-        # CONFIDENCE_THRESHOLD = 0.9
-        # filtered_detections = filtered_detections[filtered_detections.confidence < CONFIDENCE_THRESHOLD]
-        
-        # Create labels maintained by model.
-        # https://supervision.roboflow.com/how_to/track_objects/#annotate-video-with-tracking-ids
-        labels = [f"{tracker_id} {model.names[class_id]}" for class_id, tracker_id in zip(detections.class_id, detections.tracker_id)]
+            # NMS_IOU_THRESHOLD = 0.5
+            # filtered_detections = detections.with_nms(threshold=NMS_IOU_THRESHOLD)
+            # # Filter out any remaining detections with confidence less than a
+            # # specified threshold.
+            # CONFIDENCE_THRESHOLD = 0.9
+            # filtered_detections = filtered_detections[filtered_detections.confidence < CONFIDENCE_THRESHOLD]
+            
+            # Create labels maintained by model.
+            # https://supervision.roboflow.com/how_to/track_objects/#annotate-video-with-tracking-ids
+            labels = [f"{tracker_id} {model.names[class_id]}" for class_id, tracker_id in zip(detections.class_id, detections.tracker_id)]
 
-        # Add annotations to frame using supervision.
-        annotated_image = bounding_box_annotator.annotate(scene=frame,
-                                                          detections=detections)
-        annotated_image = label_annotator.annotate(scene=annotated_image,
-                                                   detections=detections,
-                                                   labels=labels)
-        annotated_image = trace_annotator.annotate(scene=annotated_image,
-                                                   detections=detections)
-        # Annotate image with zone.
-        # annotated_image = full_zone_annotator.annotate(scene=annotated_image,
-        #                                                label="")
-        # Annotate image with total bird count.
-        annotated_image = sv.draw_text(scene=annotated_image, 
-                                       text=f"Birds Seen Today: {total_bird_count}", 
-                                       text_anchor=sv.Point(x=200, y=40),
-                                       text_color=sv.Color.green(),
-                                       text_scale=1.0,
-                                       text_thickness=2)
+            # Add annotations to frame using supervision.
+            annotated_image = bounding_box_annotator.annotate(scene=frame,
+                                                            detections=detections)
+            annotated_image = label_annotator.annotate(scene=annotated_image,
+                                                    detections=detections,
+                                                    labels=labels)
+            annotated_image = trace_annotator.annotate(scene=annotated_image,
+                                                    detections=detections)
+            # Annotate image with zone.
+            # annotated_image = full_zone_annotator.annotate(scene=annotated_image,
+            #                                                label="")
+            # Annotate image with total bird count.
+            annotated_image = sv.draw_text(scene=annotated_image, 
+                                        text=f"Birds Seen Today: {total_bird_count}", 
+                                        text_anchor=sv.Point(x=200, y=40),
+                                        text_color=sv.Color.green(),
+                                        text_scale=1.0,
+                                        text_thickness=2)
 
-        # If successfully retrieved, display the retrieved frame. Create a
-        # duplicate frame resized for viewing output.
-        preview_frame = cv.resize(src=annotated_image, dsize=(preview_width, preview_height))
+            video_sink.write_frame(frame=annotated_image)
 
-        # Display the resized, annotated frame.
-        cv.imshow(winname="Camera Frames", mat=preview_frame)
-        if cv.waitKey(1) == ord('q'):
-            break
+            # If successfully retrieved, display the retrieved frame. Create a
+            # duplicate frame resized for viewing output.
+            preview_frame = cv.resize(src=annotated_image, dsize=(preview_width, preview_height))
+
+            # Display the resized, annotated frame.
+            cv.imshow(winname="Camera Frames", mat=preview_frame)
+            if cv.waitKey(1) == ord('q'):
+                break
 
     # Before leaving, release the capture device (I.e., close).
     feeder_camera.release()
