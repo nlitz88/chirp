@@ -12,6 +12,7 @@ import json
 
 import numpy as np
 import cv2 as cv
+import pafy
 
 from ultralytics import YOLO
 import supervision as sv
@@ -21,12 +22,13 @@ from zone_monitor import ZoneMonitor
 def main():
 
     # Set up argparser.
-    parser = argparse.ArgumentParser(description="Chirp bird feeder live stream bird tracking")
-    parser.add_argument("-v", 
+    parser = argparse.ArgumentParser(prog="Chirp Bird Feeder Stream Analysis",
+                                     description="Chirp bird feeder live stream bird tracking")
+    parser.add_argument("-v",
                         "--video-source", 
-                        default="/dev/video0", 
+                        default="/dev/video0",
                         type=str,
-                        help="Path to video device (/dev/videoX) or video file.")
+                        help="Path to video device (/dev/videoX), video file, or youtube video.")
     parser.add_argument("-w",
                         "--yolo-weights",
                         help="Filepath of the YOLOv8 detection model weights being used",
@@ -43,9 +45,36 @@ def main():
                         type=str)
     # Parse received arguments.
     args = parser.parse_args()
-    video_source_path = Path(args.video_source)
-    if not video_source_path.exists():
-        raise FileNotFoundError(f"Failed to find video source at provided path: {video_source_path}")
+    video_source_path = args.video_source
+    if video_source_path == None:
+        raise Exception(f"No video source was provided.")
+    # If a video source was specified, check if it is a filepath.
+    source_is_file = True
+    try:
+        video_source_path = Path(args.video_source)
+    except:
+        source_is_file = False
+    else:
+        if not video_source_path.exists():
+            raise FileNotFoundError(f"Failed to find video source at provided path: {video_source_path}")
+    # If the video source path is not empty but not a filepath, check to see if
+    # it's a YouTube link.
+    if not source_is_file:
+        try:
+            video_source_path = str(args.video_source)
+        except Exception as exc:
+            print(f"Failed to parse provided video source as a string.")
+        else:
+            # TODO: This is a really jank check--add a more meaningful check
+            # later.
+            if not "http" in video_source_path:
+                raise Exception(f"Provided URL {video_source_path} is not a valid URL!")
+            # If it is in the provided path, use pafy to grab the best available
+            # stream URL and set video_source_path equal to that.
+            else:
+                video = pafy.new(video_source_path)
+                video_source_path = video.getbest(preftype="mp4")
+
     model_weights_path = Path(args.yolo_weights)
     if not model_weights_path.exists():
         raise FileNotFoundError(f"YOLOv8 model weights not found at provided path: {model_weights_path}")
