@@ -45,35 +45,33 @@ def main():
                         type=str)
     # Parse received arguments.
     args = parser.parse_args()
+    # TODO: Refactor the video source parsing. The current implementation is a
+    # thrown together trainwreck :)
     video_source_path = args.video_source
     if video_source_path == None:
         raise Exception(f"No video source was provided.")
-    # If a video source was specified, check if it is a filepath.
-    source_is_file = True
+    # If a video source was specified, first check to see if it looks like a
+    # URL.
     try:
-        video_source_path = Path(args.video_source)
-    except:
-        source_is_file = False
+        video_source_path = str(args.video_source)
+    except Exception as exc:
+        print(f"Failed to parse provided video source as a string.")
     else:
-        if not video_source_path.exists():
-            raise FileNotFoundError(f"Failed to find video source at provided path: {video_source_path}")
-    # If the video source path is not empty but not a filepath, check to see if
-    # it's a YouTube link.
-    if not source_is_file:
-        try:
-            video_source_path = str(args.video_source)
-        except Exception as exc:
-            print(f"Failed to parse provided video source as a string.")
+        # TODO: This is a really jank check--add a more meaningful check
+        # later.
+        if "http" in video_source_path:
+            video = pafy.new(video_source_path)
+            video_source_path = video.getbest(preftype="mp4")
+        # Otherwise, treat the video source path as a filepath.
         else:
-            # TODO: This is a really jank check--add a more meaningful check
-            # later.
-            if not "http" in video_source_path:
-                raise Exception(f"Provided URL {video_source_path} is not a valid URL!")
-            # If it is in the provided path, use pafy to grab the best available
-            # stream URL and set video_source_path equal to that.
+            try:
+                video_source_path = Path(args.video_source)
+            except Exception as exc:
+                print(f"Failed to parse Path from video source path string {video_source_path}")
+                raise exc
             else:
-                video = pafy.new(video_source_path)
-                video_source_path = video.getbest(preftype="mp4")
+                if not video_source_path.exists():
+                    raise FileNotFoundError(f"Failed to find video source at provided path: {video_source_path}")
 
     model_weights_path = Path(args.yolo_weights)
     if not model_weights_path.exists():
